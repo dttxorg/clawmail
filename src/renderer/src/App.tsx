@@ -119,6 +119,33 @@ function sanitizeMailHtml(html: string): string {
   return template.innerHTML;
 }
 
+async function copyTextToClipboard(value: string): Promise<void> {
+  const clipboard = navigator.clipboard;
+  if (clipboard) {
+    try {
+      await clipboard.writeText(value);
+      return;
+    } catch {
+      // Fall back below for browsers that block Clipboard API on non-HTTPS origins.
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, value.length);
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) {
+    throw new Error('浏览器阻止了自动复制，请手动选中密钥复制。');
+  }
+}
+
 export function App() {
   const [mode, setMode] = useState<Mode>(initialGuestKey ? 'guest' : 'admin');
   const [admin, setAdmin] = useState<AdminCredentials>({ username: 'admin', password: '' });
@@ -267,6 +294,15 @@ export function App() {
     }
   }
 
+  async function copyGuestKey(key: string) {
+    try {
+      await copyTextToClipboard(key);
+      setNotice('访客密钥已复制到剪贴板。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '复制失败，请手动选中密钥复制。');
+    }
+  }
+
   useEffect(() => {
     if (initialGuestKey) void enterGuest();
   }, []);
@@ -357,7 +393,7 @@ export function App() {
                     {generatedKeys.map((item) => (
                       <div key={`${item.profileId}-${item.key}`}>
                         <code>{item.key}</code>
-                        <button className="icon-button" type="button" onClick={() => void navigator.clipboard?.writeText(item.key)} aria-label="复制密钥">
+                        <button className="icon-button" type="button" onClick={() => void copyGuestKey(item.key)} aria-label="复制密钥">
                           <Copy size={15} aria-hidden="true" />
                         </button>
                       </div>

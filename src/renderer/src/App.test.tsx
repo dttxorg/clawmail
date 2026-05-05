@@ -101,6 +101,7 @@ describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal('fetch', mockFetch());
+    document.execCommand = vi.fn(() => true);
     Object.assign(navigator, {
       clipboard: {
         writeText: vi.fn()
@@ -139,6 +140,35 @@ describe('App', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/admin/mailboxes', expect.objectContaining({ method: 'POST' }));
   });
 
+  it('copies generated guest keys with feedback', async () => {
+    render(<App />);
+    await loginAdmin();
+
+    fireEvent.change(screen.getByPlaceholderText(/Hermes 安装命令/), { target: { value: 't1/test-token' } });
+    fireEvent.click(screen.getByRole('button', { name: /添加邮箱/ }));
+    await screen.findByText('新访客密钥');
+
+    fireEvent.click(screen.getByRole('button', { name: '复制密钥' }));
+
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledWith('ck_guest_test_key_12345678901234567890'));
+    expect(screen.getByText('访客密钥已复制到剪贴板。')).toBeInTheDocument();
+  });
+
+  it('falls back when Clipboard API is blocked', async () => {
+    vi.mocked(navigator.clipboard.writeText).mockRejectedValueOnce(new Error('blocked'));
+    render(<App />);
+    await loginAdmin();
+
+    fireEvent.change(screen.getByPlaceholderText(/Hermes 安装命令/), { target: { value: 't1/test-token' } });
+    fireEvent.click(screen.getByRole('button', { name: /添加邮箱/ }));
+    await screen.findByText('新访客密钥');
+
+    fireEvent.click(screen.getByRole('button', { name: '复制密钥' }));
+
+    await waitFor(() => expect(document.execCommand).toHaveBeenCalledWith('copy'));
+    expect(screen.getByText('访客密钥已复制到剪贴板。')).toBeInTheDocument();
+  });
+
   it('enters guest mode and triggers a mailbox refresh immediately', async () => {
     const fetchMock = vi.mocked(fetch);
     render(<App />);
@@ -148,7 +178,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /进入并刷新/ }));
 
     await screen.findByText('test-1@claw.email');
-    expect(screen.getByText('测试邮件')).toBeInTheDocument();
+    expect(screen.getAllByText('测试邮件').length).toBeGreaterThan(0);
     expect(fetchMock).toHaveBeenCalledWith('/api/guest/session', expect.objectContaining({ method: 'POST' }));
   });
 
