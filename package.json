@@ -1,0 +1,70 @@
+{
+  "name": "clawinbox",
+  "version": "0.1.1",
+  "description": "Docker-ready ClawEmail inbox with admin and guest-key access.",
+  "private": true,
+  "main": "./out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "rebuild:sqlite:node": "npm rebuild better-sqlite3",
+    "dev": "vite --config vite.web.config.ts",
+    "dev:server": "npm run build:server && NODE_ENV=development CLAWMAIL_DATA_DIR=./data CLAWMAIL_ADMIN_PASSWORD=admin CLAWMAIL_MASTER_KEY=development-master-key node dist/server/index.js",
+    "build": "tsc --noEmit && npm run build:web && npm run build:server",
+    "build:web": "vite build --config vite.web.config.ts",
+    "build:server": "vite build --config vite.server.config.ts",
+    "start": "node dist/server/index.js",
+    "preview": "npm run build && npm run start",
+    "pretest": "npm run rebuild:sqlite:node",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "docker:build": "docker build -t clawmail ."
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "dompurify": "^3.4.2",
+    "execa": "^9.5.2",
+    "imapflow": "^1.3.3",
+    "lucide-react": "^0.468.0",
+    "mailparser": "^3.9.8",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^26.8.1",
+    "electron-vite": "^2.3.0",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  },
+  "build": {
+    "appId": "com.clawinbox.app",
+    "productName": "ClawInbox",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  }
+}
