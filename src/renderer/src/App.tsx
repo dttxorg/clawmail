@@ -31,7 +31,7 @@ interface AdminProfile extends MailboxProfile {
 
 interface GuestRefresh {
   skipped: boolean;
-  reason: 'REFRESHED' | 'IN_FLIGHT' | 'COOLDOWN';
+  reason: 'REFRESHED' | 'IN_FLIGHT' | 'COOLDOWN' | 'RATE_LIMIT';
   result: SyncResult;
 }
 
@@ -148,7 +148,7 @@ async function copyTextToClipboard(value: string): Promise<void> {
 }
 
 export function App() {
-  const [mode, setMode] = useState<Mode>(initialGuestKey ? 'guest' : 'admin');
+  const [mode, setMode] = useState<Mode>('guest');
   const [admin, setAdmin] = useState<AdminCredentials>({ username: 'admin', password: '' });
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
   const [guestKey, setGuestKey] = useState(initialGuestKey);
@@ -158,6 +158,7 @@ export function App() {
   const [selectedProfileId, setSelectedProfileId] = useState('all');
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [selectedMessage, setSelectedMessage] = useState<MailDetail | null>(null);
+  const [messageDetails, setMessageDetails] = useState<Record<string, MailDetail>>({});
   const [authUrl, setAuthUrl] = useState('');
   const [generatedKeys, setGeneratedKeys] = useState<GeneratedGuestKey[]>([]);
   const [notice, setNotice] = useState('Docker Web 模式：不会后台刷新全部邮箱，只有管理员手动刷新或访客密钥访问时刷新对应邮箱。');
@@ -326,14 +327,37 @@ export function App() {
       return;
     }
 
+    const cachedDetail = messageDetails[selectedMessageId];
+    if (cachedDetail?.bodyText) {
+      setSelectedMessage(cachedDetail);
+      return;
+    }
+
+    const summary = messages.find((message) => message.id === selectedMessageId);
+    if (summary) {
+      setSelectedMessage({
+        ...summary,
+        bodyText: '正在读取邮件正文...'
+      });
+    }
+
     const path = mode === 'guest' ? `/api/guest/messages/${encodeURIComponent(selectedMessageId)}` : `/api/admin/messages/${encodeURIComponent(selectedMessageId)}`;
+    let cancelled = false;
     void requestJson<MailDetail>(path, mode === 'guest' ? { guestKey } : { admin })
-      .then(setSelectedMessage)
+      .then((detail) => {
+        if (cancelled) return;
+        setMessageDetails((current) => ({ ...current, [detail.id]: detail }));
+        setSelectedMessage(detail);
+      })
       .catch((error) => {
+        if (cancelled) return;
         setSelectedMessage(null);
         setNotice(error instanceof Error ? error.message : '读取邮件详情失败。');
       });
-  }, [selectedMessageId, mode]);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedMessageId, mode, messages, messageDetails, guestKey]);
 
   return (
     <main className="app-shell">

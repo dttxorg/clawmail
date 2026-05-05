@@ -9,6 +9,8 @@ import type { MailSummary, MailboxProfile } from '../shared/types';
 import { createSqliteAccessKeyStore, type AccessKeyStore, type GuestAccessKeyResult } from './accessKeyStore';
 import { createEncryptedFileSecretStore } from './encryptedFileSecretStore';
 import { RefreshManager } from './refreshManager';
+import { GuestRefreshLimiter } from './guestRefreshLimiter';
+import { MessageReadManager } from './messageReadManager';
 
 interface ServerConfig {
   port: number;
@@ -69,6 +71,8 @@ export async function createClawMailServer(config = loadServerConfig()) {
   const secretStore = createEncryptedFileSecretStore(config.secretFilePath, config.masterKey);
   const adapter = createRealClawCliAdapter({ cacheStore, secretStore });
   const refreshManager = new RefreshManager(adapter, config.refreshCooldownMs);
+  const guestRefreshLimiter = new GuestRefreshLimiter();
+  const messageReadManager = new MessageReadManager(adapter);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -86,7 +90,9 @@ export async function createClawMailServer(config = loadServerConfig()) {
           config,
           adapter,
           accessKeyStore,
-          refreshManager
+          refreshManager,
+          guestRefreshLimiter,
+          messageReadManager
         });
         return;
       }
@@ -118,9 +124,11 @@ async function routeApi(
     adapter: ReturnType<typeof createRealClawCliAdapter>;
     accessKeyStore: AccessKeyStore;
     refreshManager: RefreshManager;
+    guestRefreshLimiter: GuestRefreshLimiter;
+    messageReadManager: MessageReadManager;
   }
 ): Promise<void> {
-  const { adapter, accessKeyStore, config, refreshManager } = dependencies;
+  const { adapter, accessKeyStore, config, refreshManager, guestRefreshLimiter, messageReadManager } = dependencies;
 
   if (ctx.method === 'GET' && ctx.path === '/api/health') {
     writeJson(ctx.res, 200, { ok: true });
@@ -150,7 +158,7 @@ async function routeApi(
     const adminMessageMatch = ctx.path.match(/^\/api\/admin\/messages\/(.+)$/);
     if (ctx.method === 'GET' && adminMessageMatch) {
       const messageId = decodeURIComponent(adminMessageMatch[1]);
-      writeJson(ctx.res, 200, await adapter.getMessage(messageId));
+      writeJson(ctx.res, 200, await readMessageDetail(messageReadManager, messageId));
       return;
     }
 
@@ -210,7 +218,7 @@ async function routeApi(
       const profileId = accessKeyStore.verifyAccessKey(key);
       if (!profileId) throw new HttpError(401, 'INVALID_GUEST_KEY', '密钥无效或已被重置。');
 
-      const refresh = await refreshManager.refreshProfile(profileId);
+      const refresh = await refreshGuestProfile(refreshManager, guestRefreshLimiter, profileId);
       const payload = await buildGuestMailbox(adapter, profileId);
       writeJson(ctx.res, 200, { ...payload, refresh });
       return;
@@ -223,7 +231,7 @@ async function routeApi(
     }
 
     if (ctx.method === 'POST' && ctx.path === '/api/guest/refresh') {
-      const refresh = await refreshManager.refreshProfile(profileId);
+      const refresh = await refreshGuestProfile(refreshManager, guestRefreshLimiter, profileId);
       const payload = await buildGuestMailbox(adapter, profileId);
       writeJson(ctx.res, 200, { ...payload, refresh });
       return;
@@ -235,12 +243,41 @@ async function routeApi(
       const messages = await adapter.listUnifiedInbox();
       const summary = messages.find((message) => message.id === messageId && message.profileId === profileId);
       if (!summary) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮件。');
-      writeJson(ctx.res, 200, await adapter.getMessage(summary.id));
+      writeJson(ctx.res, 200, await readMessageDetail(messageReadManager, summary.id));
       return;
     }
   }
 
   throw new HttpError(404, 'NOT_FOUND', '接口不存在。');
+}
+
+async function refreshGuestProfile(
+  refreshManager: RefreshManager,
+  limiter: GuestRefreshLimiter,
+  profileId: string
+) {
+  if (!limiter.consume(profileId)) {
+    return {
+      skipped: true,
+      reason: 'RATE_LIMIT' as const,
+      result: {
+        ok: true,
+        profileId,
+        syncedAt: new Date().toISOString(),
+        message: '刷新过于频繁，已显示当前缓存；稍后可继续刷新。'
+      }
+    };
+  }
+
+  return refreshManager.refreshProfile(profileId, { force: true });
+}
+
+async function readMessageDetail(messageReadManager: MessageReadManager, messageId: string) {
+  try {
+    return await messageReadManager.getMessage(messageId);
+  } catch {
+    throw new HttpError(502, 'MESSAGE_READ_FAILED', '正文读取失败，请稍后重试或切换回来再次打开。');
+  }
 }
 
 async function buildGuestMailbox(adapter: ReturnType<typeof createRealClawCliAdapter>, profileId: string): Promise<{

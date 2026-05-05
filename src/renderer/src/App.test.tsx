@@ -95,6 +95,7 @@ function mockFetch() {
 }
 
 async function loginAdmin() {
+  fireEvent.click(screen.getByRole('button', { name: /管理员/ }));
   fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'admin-password' } });
   fireEvent.click(screen.getByRole('button', { name: /登录/ }));
   await screen.findByText('测试邮件');
@@ -112,11 +113,19 @@ describe('App', () => {
     });
   });
 
-  it('starts at the admin login screen', () => {
+  it('starts at the guest access screen', () => {
     render(<App />);
 
+    expect(screen.getByRole('heading', { name: '访客访问' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /进入并刷新/ })).toBeInTheDocument();
+  });
+
+  it('shows admin login after switching modes', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: /管理员/ }));
+
     expect(screen.getByRole('heading', { name: '管理员登录' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /登录/ })).toBeInTheDocument();
   });
 
   it('loads the admin inbox without import or export controls', async () => {
@@ -176,7 +185,6 @@ describe('App', () => {
     const fetchMock = vi.mocked(fetch);
     render(<App />);
 
-    fireEvent.click(screen.getByRole('button', { name: /访客/ }));
     fireEvent.change(screen.getByLabelText('访客密钥'), { target: { value: 'ck_guest_test_key_12345678901234567890' } });
     fireEvent.click(screen.getByRole('button', { name: /进入并刷新/ }));
 
@@ -188,7 +196,6 @@ describe('App', () => {
   it('sanitizes HTML mail bodies', async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole('button', { name: /访客/ }));
     fireEvent.change(screen.getByLabelText('访客密钥'), { target: { value: 'ck_guest_test_key_12345678901234567890' } });
     fireEvent.click(screen.getByRole('button', { name: /进入并刷新/ }));
 
