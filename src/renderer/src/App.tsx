@@ -326,7 +326,7 @@ export function App() {
   function openTimeEditor(profile: AdminProfile) {
     setAdminView('inbox');
     setSelectedProfileId(profile.id);
-    setTimeEditorProfileId(profile.id);
+    setTimeEditorProfileId((current) => (current === profile.id ? null : profile.id));
   }
 
   async function signInAdmin() {

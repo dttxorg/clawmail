@@ -301,6 +301,18 @@ describe('App', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/admin/mailboxes/profile-1/expiration', expect.objectContaining({ method: 'PATCH' })));
   });
 
+  it('toggles the mailbox time management panel from the row action', async () => {
+    render(<App />);
+    await loginAdmin();
+
+    const timeButton = screen.getByRole('button', { name: '时间管理' });
+    fireEvent.click(timeButton);
+    expect(screen.getByRole('heading', { name: '时间管理' })).toBeInTheDocument();
+
+    fireEvent.click(timeButton);
+    expect(screen.queryByRole('heading', { name: '时间管理' })).not.toBeInTheDocument();
+  });
+
   it('shows the calendar page with key and subscription dates', async () => {
     render(<App />);
     await loginAdmin();
