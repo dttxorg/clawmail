@@ -286,6 +286,12 @@ async function routeApi(
     const messageMatch = ctx.path.match(/^\/api\/guest\/messages\/(.+)$/);
     if (ctx.method === 'GET' && messageMatch) {
       const messageId = decodeURIComponent(messageMatch[1]);
+      if (messageId.includes(':')) {
+        if (!messageId.startsWith(`${profileId}:`)) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮件。');
+        writeJson(ctx.res, 200, await readMessageDetail(messageReadManager, messageId));
+        return;
+      }
+
       const messages = await adapter.listUnifiedInbox();
       const summary = messages.find((message) => message.id === messageId && message.profileId === profileId);
       if (!summary) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮件。');

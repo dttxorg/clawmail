@@ -26,9 +26,33 @@ button {
   cursor: pointer;
 }
 
+button,
+.button,
+.icon-button {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.62;
+}
+
+button:hover:not(:disabled),
+.button:hover:not(:disabled),
+.icon-button:hover:not(:disabled) {
+  border-color: #8fb7aa;
+  background: #edf7f3;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid #2f8f79;
+  outline-offset: 2px;
 }
 
 .app-shell {
@@ -224,7 +248,8 @@ textarea {
 
 .guest-profile p,
 .guest-profile small,
-.generated-key small {
+.generated-key small,
+.validity-heading small {
   margin: 0;
   color: #66727f;
 }
@@ -266,6 +291,21 @@ textarea {
 
 .validity-panel label {
   margin-top: 4px;
+}
+
+.validity-heading {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.validity-heading small {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .calendar-row {
@@ -315,11 +355,16 @@ code {
 
 .profile-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
+  gap: 6px;
   margin-top: 6px;
   border-radius: 8px;
+  border: 1px solid transparent;
+  background: #ffffff;
+}
+
+.profile-row:hover {
+  border-color: #cbd9d5;
+  box-shadow: 0 1px 0 rgba(31, 41, 51, 0.04);
 }
 
 .profile-select {
@@ -373,8 +418,8 @@ code {
 
 .profile-actions {
   display: flex;
-  gap: 4px;
-  padding-right: 6px;
+  gap: 6px;
+  padding: 0 10px 10px 29px;
 }
 
 .icon-button {
@@ -384,8 +429,19 @@ code {
   background: #ffffff;
 }
 
+.icon-button:hover:not(:disabled) {
+  color: #155c50;
+  box-shadow: 0 1px 4px rgba(31, 41, 51, 0.08);
+}
+
 .icon-button.danger {
   color: #b42318;
+}
+
+.icon-button.danger:hover:not(:disabled) {
+  border-color: #efb4ad;
+  background: #fff2f0;
+  color: #8f1d14;
 }
 
 .message-list {
@@ -503,6 +559,135 @@ code {
   text-align: center;
 }
 
+.calendar-board {
+  display: grid;
+  grid-column: 2 / 4;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: #ffffff;
+}
+
+.calendar-toolbar {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  gap: 12px;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid #d9e0e7;
+}
+
+.calendar-toolbar h2,
+.calendar-toolbar p,
+.calendar-day-detail h3 {
+  margin: 0;
+}
+
+.calendar-toolbar p {
+  margin-top: 4px;
+  color: #66727f;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(92px, 1fr));
+  grid-auto-rows: minmax(106px, 1fr);
+  gap: 1px;
+  min-width: 720px;
+  background: #d9e0e7;
+}
+
+.calendar-weekday {
+  display: grid;
+  place-items: center;
+  min-height: 36px;
+  background: #f8fafb;
+  color: #66727f;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.calendar-day {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-height: 106px;
+  padding: 8px;
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
+  color: #243241;
+  text-align: left;
+}
+
+.calendar-day:hover {
+  background: #f3faf6;
+}
+
+.calendar-day.active {
+  box-shadow: inset 0 0 0 2px #2f8f79;
+}
+
+.calendar-day.muted {
+  background: #f6f8fa;
+  color: #8a96a3;
+}
+
+.calendar-day strong {
+  font-size: 14px;
+}
+
+.calendar-day span {
+  width: fit-content;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #e8f3ef;
+  color: #155c50;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.calendar-day small {
+  overflow: hidden;
+  color: #66727f;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-day-detail {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid #d9e0e7;
+  background: #f8fafb;
+}
+
+.calendar-event {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid #d9e0e7;
+  border-radius: 8px;
+  background: #ffffff;
+  color: inherit;
+  text-align: left;
+}
+
+.calendar-event span {
+  color: #206a5d;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.calendar-event small {
+  overflow: hidden;
+  color: #66727f;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }
@@ -530,9 +715,16 @@ code {
   }
 
   .sidebar,
-  .message-list {
+  .message-list,
+  .calendar-board {
+    grid-column: auto;
     max-height: none;
     border-right: 0;
     border-bottom: 1px solid #d9e0e7;
+  }
+
+  .calendar-grid {
+    grid-template-columns: repeat(7, minmax(78px, 1fr));
+    min-width: 560px;
   }
 }

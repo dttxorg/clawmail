@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import {
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Clock3,
   Copy,
   KeyRound,
   Eye,
@@ -123,6 +126,47 @@ function daysFromNowLocal(days: number): string {
   return formatDateTimeLocal(date.toISOString());
 }
 
+function dateKey(value: string | Date): string {
+  const date = typeof value === 'string' ? new Date(value) : value;
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function monthKey(value: Date): string {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-01`;
+}
+
+function addMonths(value: string, amount: number): string {
+  const date = new Date(`${value}T00:00:00`);
+  date.setMonth(date.getMonth() + amount);
+  return monthKey(date);
+}
+
+function formatMonthTitle(value: string): string {
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: 'long'
+  }).format(new Date(`${value}T00:00:00`));
+}
+
+function buildCalendarDays(value: string): Array<{ key: string; day: number; inMonth: boolean }> {
+  const first = new Date(`${value}T00:00:00`);
+  const start = new Date(first);
+  start.setDate(first.getDate() - first.getDay());
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    return {
+      key: dateKey(date),
+      day: date.getDate(),
+      inMonth: date.getMonth() === first.getMonth()
+    };
+  });
+}
+
 function basicAuth(credentials: AdminCredentials): string {
   return `Basic ${btoa(`${credentials.username}:${credentials.password}`)}`;
 }
@@ -213,6 +257,9 @@ export function App() {
   const [mustChangePassword, setMustChangePassword] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
   const [adminView, setAdminView] = useState<AdminView>('inbox');
+  const [timeEditorProfileId, setTimeEditorProfileId] = useState<string | null>(null);
+  const [calendarCursor, setCalendarCursor] = useState(monthKey(new Date()));
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(dateKey(new Date()));
   const [guestKey, setGuestKey] = useState(initialGuestKey);
   const [profiles, setProfiles] = useState<AdminProfile[]>([]);
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
@@ -228,13 +275,26 @@ export function App() {
   const [mailboxExpiresAtDraft, setMailboxExpiresAtDraft] = useState('');
   const [notice, setNotice] = useState('Docker Web 模式：不会后台刷新全部邮箱，只有管理员手动刷新或访客密钥访问时刷新对应邮箱。');
   const [isBusy, setIsBusy] = useState(false);
+  const detailRequestsRef = useRef<Record<string, Promise<MailDetail>>>({});
 
   const visibleMessages = useMemo(() => {
     if (mode === 'guest' || selectedProfileId === 'all') return messages;
     return messages.filter((message) => message.profileId === selectedProfileId);
   }, [messages, mode, selectedProfileId]);
   const activeProfile = mode === 'guest' ? guestProfile : profiles.find((profile) => profile.id === selectedProfileId) ?? null;
-  const sanitizedBodyHtml = selectedMessage?.bodyHtml ? sanitizeMailHtml(selectedMessage.bodyHtml) : '';
+  const timeEditorProfile = profiles.find((profile) => profile.id === timeEditorProfileId) ?? null;
+  const sanitizedBodyHtml = useMemo(() => (selectedMessage?.bodyHtml ? sanitizeMailHtml(selectedMessage.bodyHtml) : ''), [selectedMessage?.bodyHtml]);
+  const calendarDays = useMemo(() => buildCalendarDays(calendarCursor), [calendarCursor]);
+  const calendarItemsByDate = useMemo(() => {
+    const groups = new Map<string, CalendarItem[]>();
+    for (const item of calendarItems) {
+      const key = dateKey(item.expiresAt);
+      if (!key) continue;
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    return groups;
+  }, [calendarItems]);
+  const selectedCalendarItems = calendarItemsByDate.get(selectedCalendarDate) ?? [];
 
   async function loadAdminData(credentials = admin) {
     const [{ profiles: nextProfiles }, { messages: nextMessages }] = await Promise.all([
@@ -254,12 +314,19 @@ export function App() {
   async function switchAdminView(view: AdminView) {
     setAdminView(view);
     if (view === 'calendar') {
+      setTimeEditorProfileId(null);
       try {
         await loadCalendar();
       } catch (error) {
         setNotice(error instanceof Error ? error.message : '读取日历失败。');
       }
     }
+  }
+
+  function openTimeEditor(profile: AdminProfile) {
+    setAdminView('inbox');
+    setSelectedProfileId(profile.id);
+    setTimeEditorProfileId(profile.id);
   }
 
   async function signInAdmin() {
@@ -463,16 +530,33 @@ export function App() {
     }
   }
 
+  function requestMessageDetail(messageId: string): Promise<MailDetail> {
+    const requestKey = `${mode}:${messageId}`;
+    const running = detailRequestsRef.current[requestKey];
+    if (running) return running;
+
+    const path = mode === 'guest' ? `/api/guest/messages/${encodeURIComponent(messageId)}` : `/api/admin/messages/${encodeURIComponent(messageId)}`;
+    const promise = requestJson<MailDetail>(path, mode === 'guest' ? { guestKey } : { admin })
+      .then((detail) => {
+        setMessageDetails((current) => (current[detail.id] ? current : { ...current, [detail.id]: detail }));
+        return detail;
+      })
+      .finally(() => {
+        delete detailRequestsRef.current[requestKey];
+      });
+    detailRequestsRef.current[requestKey] = promise;
+    return promise;
+  }
+
   useEffect(() => {
     if (initialGuestKey) void enterGuest();
   }, []);
 
   useEffect(() => {
-    if (mode !== 'admin' || selectedProfileId === 'all' || !activeProfile) return;
-    const adminProfile = profiles.find((profile) => profile.id === activeProfile.id);
-    setKeyExpiresAtDraft(formatDateTimeLocal(adminProfile?.guestAccessKey?.expiresAt));
-    setMailboxExpiresAtDraft(formatDateTimeLocal(adminProfile?.mailboxExpiresAt));
-  }, [activeProfile?.id, mode, profiles, selectedProfileId]);
+    if (mode !== 'admin' || !timeEditorProfile) return;
+    setKeyExpiresAtDraft(formatDateTimeLocal(timeEditorProfile.guestAccessKey?.expiresAt));
+    setMailboxExpiresAtDraft(formatDateTimeLocal(timeEditorProfile.mailboxExpiresAt));
+  }, [mode, timeEditorProfile?.id, profiles]);
 
   useEffect(() => {
     if (!selectedMessageId) {
@@ -481,7 +565,7 @@ export function App() {
     }
 
     const cachedDetail = messageDetails[selectedMessageId];
-    if (cachedDetail?.bodyText) {
+    if (cachedDetail) {
       setSelectedMessage(cachedDetail);
       return;
     }
@@ -494,12 +578,10 @@ export function App() {
       });
     }
 
-    const path = mode === 'guest' ? `/api/guest/messages/${encodeURIComponent(selectedMessageId)}` : `/api/admin/messages/${encodeURIComponent(selectedMessageId)}`;
     let cancelled = false;
-    void requestJson<MailDetail>(path, mode === 'guest' ? { guestKey } : { admin })
+    void requestMessageDetail(selectedMessageId)
       .then((detail) => {
         if (cancelled) return;
-        setMessageDetails((current) => ({ ...current, [detail.id]: detail }));
         setSelectedMessage(detail);
       })
       .catch((error) => {
@@ -511,6 +593,18 @@ export function App() {
       cancelled = true;
     };
   }, [selectedMessageId, mode, messages, messageDetails, guestKey]);
+
+  useEffect(() => {
+    if (mode !== 'guest' || !selectedMessageId) return;
+    const currentIndex = visibleMessages.findIndex((message) => message.id === selectedMessageId);
+    if (currentIndex < 0) return;
+    const nearbyIds = [currentIndex + 1, currentIndex - 1, currentIndex + 2]
+      .map((index) => visibleMessages[index]?.id)
+      .filter((id): id is string => Boolean(id));
+    for (const id of nearbyIds) {
+      if (!messageDetails[id]) void requestMessageDetail(id).catch(() => undefined);
+    }
+  }, [selectedMessageId, visibleMessages, mode, messageDetails, guestKey]);
 
   return (
     <main className="app-shell">
@@ -610,7 +704,7 @@ export function App() {
                     {generatedKeys.map((item) => (
                       <div key={`${item.profileId}-${item.key}`}>
                         <code>{item.key}</code>
-                        <button className="icon-button" type="button" onClick={() => void copyGuestKey(item.key)} aria-label="复制密钥">
+                        <button className="icon-button" type="button" onClick={() => void copyGuestKey(item.key)} aria-label="复制密钥" title="复制密钥">
                           <Copy size={15} aria-hidden="true" />
                         </button>
                       </div>
@@ -619,9 +713,15 @@ export function App() {
                   </section>
                 )}
 
-                {selectedProfileId !== 'all' && activeProfile && (
+                {timeEditorProfile && (
                   <section className="validity-panel">
-                    <h2>时间管理</h2>
+                    <div className="validity-heading">
+                      <Clock3 size={16} aria-hidden="true" />
+                      <div>
+                        <h2>时间管理</h2>
+                        <small>{timeEditorProfile.displayName} · {timeEditorProfile.emailAddress}</small>
+                      </div>
+                    </div>
                     <label htmlFor="key-expires-at">密钥有效时间</label>
                     <input id="key-expires-at" type="datetime-local" value={keyExpiresAtDraft} onChange={(event) => setKeyExpiresAtDraft(event.target.value)} />
                     <div className="quick-days">
@@ -632,7 +732,7 @@ export function App() {
                       ))}
                       <button type="button" onClick={() => setKeyExpiresAtDraft('')}>不限</button>
                     </div>
-                    <button className="button secondary full" type="button" onClick={() => updateKeyExpiration(activeProfile.id)}>
+                    <button className="button secondary full" type="button" onClick={() => updateKeyExpiration(timeEditorProfile.id)}>
                       保存密钥时间
                     </button>
 
@@ -647,7 +747,7 @@ export function App() {
                       ))}
                       <button type="button" onClick={() => setMailboxExpiresAtDraft('')}>不限</button>
                     </div>
-                    <button className="button secondary full" type="button" onClick={() => updateMailboxExpiration(activeProfile.id)}>
+                    <button className="button secondary full" type="button" onClick={() => updateMailboxExpiration(timeEditorProfile.id)}>
                       保存订阅到期
                     </button>
                   </section>
@@ -672,35 +772,26 @@ export function App() {
                           </span>
                         </button>
                         <div className="profile-actions">
-                          <button className="icon-button" type="button" onClick={() => refreshProfile(profile.id)} aria-label="刷新邮箱">
+                          <button className="icon-button" type="button" onClick={() => refreshProfile(profile.id)} aria-label="刷新邮箱" title="刷新邮箱">
                             <RefreshCw size={15} aria-hidden="true" />
                           </button>
-                          <button className="icon-button" type="button" onClick={() => viewGuestKey(profile.id)} aria-label="查看访客密钥">
+                          <button className="icon-button" type="button" onClick={() => viewGuestKey(profile.id)} aria-label="查看访客密钥" title="查看访客密钥">
                             <Eye size={15} aria-hidden="true" />
                           </button>
-                          <button className="icon-button" type="button" onClick={() => rotateGuestKey(profile.id)} aria-label="重置访客密钥">
+                          <button className="icon-button" type="button" onClick={() => rotateGuestKey(profile.id)} aria-label="重置访客密钥" title="重置访客密钥">
                             <KeyRound size={15} aria-hidden="true" />
                           </button>
-                          <button className="icon-button danger" type="button" onClick={() => deleteProfile(profile)} aria-label="删除邮箱">
+                          <button className="icon-button" type="button" onClick={() => openTimeEditor(profile)} aria-label="时间管理" title="时间管理">
+                            <Clock3 size={15} aria-hidden="true" />
+                          </button>
+                          <button className="icon-button danger" type="button" onClick={() => deleteProfile(profile)} aria-label="删除邮箱" title="删除邮箱">
                             <Trash2 size={15} aria-hidden="true" />
                           </button>
                         </div>
                       </div>
                     ))}
                   </>
-                ) : (
-                  <section className="calendar-list" aria-label="时间日历">
-                    <h2>日期日历</h2>
-                    {calendarItems.length === 0 && <p className="empty-copy">暂无设置有效时间的密钥或邮箱订阅到期时间。</p>}
-                    {calendarItems.map((item) => (
-                      <article className="calendar-row" key={`${item.type}-${item.profileId}-${item.expiresAt}`}>
-                        <span>{item.type === 'key' ? '密钥有效期' : '邮箱订阅到期'}</span>
-                        <strong>{formatFullDate(item.expiresAt)}</strong>
-                        <small>{item.displayName} · {item.emailAddress} · {formatCountdown(item.expiresAt)}</small>
-                      </article>
-                    ))}
-                  </section>
-                )}
+                ) : null}
               </>
             ) : (
               guestProfile && (
@@ -718,64 +809,130 @@ export function App() {
             )}
           </aside>
 
-          <section className="message-list" aria-label="邮件列表">
-            <div className="panel-header">
-              <div>
-                <h2>{activeProfile?.displayName ?? '缓存邮件'}</h2>
-                <p>{visibleMessages.length} 封邮件</p>
-              </div>
-            </div>
-            <div className="messages">
-              {visibleMessages.map((message) => (
-                <button
-                  type="button"
-                  className={`message-row ${message.id === selectedMessageId ? 'active' : ''} ${message.isRead ? 'read' : 'unread'}`}
-                  key={message.id}
-                  onClick={() => setSelectedMessageId(message.id)}
-                >
-                  <span className="message-sender">{message.fromName}</span>
-                  <span className="message-time">{formatDate(message.receivedAt)}</span>
-                  <span className="message-subject">{message.subject}</span>
-                  <span className="message-snippet">{message.snippet}</span>
+          {mode === 'admin' && adminView === 'calendar' ? (
+            <section className="calendar-board" aria-label="到期日历">
+              <div className="calendar-toolbar">
+                <button className="icon-button" type="button" onClick={() => setCalendarCursor(addMonths(calendarCursor, -1))} aria-label="上个月" title="上个月">
+                  <ChevronLeft size={16} aria-hidden="true" />
                 </button>
-              ))}
-              {visibleMessages.length === 0 && <p className="empty-copy">还没有缓存邮件，刷新邮箱后会显示在这里。</p>}
-            </div>
-          </section>
-
-          <section className="detail-pane" aria-label="邮件详情">
-            {selectedMessage ? (
-              <>
-                <div className="detail-header">
-                  <Mail size={20} aria-hidden="true" />
+                <div>
+                  <h2>到期日历</h2>
+                  <p>{formatMonthTitle(calendarCursor)}</p>
+                </div>
+                <button className="icon-button" type="button" onClick={() => setCalendarCursor(addMonths(calendarCursor, 1))} aria-label="下个月" title="下个月">
+                  <ChevronRight size={16} aria-hidden="true" />
+                </button>
+              </div>
+              <div className="calendar-grid">
+                {['日', '一', '二', '三', '四', '五', '六'].map((weekday) => (
+                  <span className="calendar-weekday" key={weekday}>{weekday}</span>
+                ))}
+                {calendarDays.map((day) => {
+                  const dayItems = calendarItemsByDate.get(day.key) ?? [];
+                  return (
+                    <button
+                      className={`calendar-day ${day.inMonth ? '' : 'muted'} ${selectedCalendarDate === day.key ? 'active' : ''}`}
+                      type="button"
+                      key={day.key}
+                      onClick={() => setSelectedCalendarDate(day.key)}
+                    >
+                      <strong>{day.day}</strong>
+                      {dayItems.length > 0 && <span>{dayItems.length} 项到期</span>}
+                      {dayItems.slice(0, 2).map((item) => (
+                        <small key={`${item.type}-${item.profileId}-${item.expiresAt}`}>{item.type === 'key' ? '密钥' : '订阅'} · {item.displayName}</small>
+                      ))}
+                    </button>
+                  );
+                })}
+              </div>
+              <aside className="calendar-day-detail" aria-label="当日到期账号">
+                <h3>{selectedCalendarDate} 到期</h3>
+                {selectedCalendarItems.length === 0 ? (
+                  <p className="empty-copy">这一天没有密钥或邮箱订阅到期。</p>
+                ) : (
+                  selectedCalendarItems.map((item) => (
+                    <button
+                      className="calendar-event"
+                      type="button"
+                      key={`${item.type}-${item.profileId}-${item.expiresAt}`}
+                      onClick={() => {
+                        const profile = profiles.find((profileItem) => profileItem.id === item.profileId);
+                        if (profile) openTimeEditor(profile);
+                      }}
+                    >
+                      <span>{item.type === 'key' ? '密钥有效期' : '邮箱订阅到期'}</span>
+                      <strong>{item.displayName}</strong>
+                      <small>{item.emailAddress} · {formatFullDate(item.expiresAt)} · {formatCountdown(item.expiresAt)}</small>
+                    </button>
+                  ))
+                )}
+              </aside>
+            </section>
+          ) : (
+            <>
+              <section className="message-list" aria-label="邮件列表">
+                <div className="panel-header">
                   <div>
-                    <h2>{selectedMessage.subject}</h2>
-                    <p>{selectedMessage.fromName} &lt;{selectedMessage.fromAddress}&gt;</p>
+                    <h2>{activeProfile?.displayName ?? '缓存邮件'}</h2>
+                    <p>{visibleMessages.length} 封邮件</p>
                   </div>
                 </div>
-                <dl className="detail-meta">
-                  <div>
-                    <dt>时间</dt>
-                    <dd>{formatDate(selectedMessage.receivedAt)}</dd>
-                  </div>
-                  <div>
-                    <dt>来源邮箱</dt>
-                    <dd>{activeProfile?.emailAddress ?? profiles.find((profile) => profile.id === selectedMessage.profileId)?.emailAddress ?? '未知'}</dd>
-                  </div>
-                </dl>
-                {sanitizedBodyHtml ? (
-                  <article className="mail-body html" dangerouslySetInnerHTML={{ __html: sanitizedBodyHtml }} />
+                <div className="messages">
+                  {visibleMessages.map((message) => (
+                    <button
+                      type="button"
+                      className={`message-row ${message.id === selectedMessageId ? 'active' : ''} ${message.isRead ? 'read' : 'unread'}`}
+                      key={message.id}
+                      onClick={() => setSelectedMessageId(message.id)}
+                      onMouseEnter={() => {
+                        if (mode === 'guest' && !messageDetails[message.id]) void requestMessageDetail(message.id).catch(() => undefined);
+                      }}
+                    >
+                      <span className="message-sender">{message.fromName}</span>
+                      <span className="message-time">{formatDate(message.receivedAt)}</span>
+                      <span className="message-subject">{message.subject}</span>
+                      <span className="message-snippet">{message.snippet}</span>
+                    </button>
+                  ))}
+                  {visibleMessages.length === 0 && <p className="empty-copy">还没有缓存邮件，刷新邮箱后会显示在这里。</p>}
+                </div>
+              </section>
+
+              <section className="detail-pane" aria-label="邮件详情">
+                {selectedMessage ? (
+                  <>
+                    <div className="detail-header">
+                      <Mail size={20} aria-hidden="true" />
+                      <div>
+                        <h2>{selectedMessage.subject}</h2>
+                        <p>{selectedMessage.fromName} &lt;{selectedMessage.fromAddress}&gt;</p>
+                      </div>
+                    </div>
+                    <dl className="detail-meta">
+                      <div>
+                        <dt>时间</dt>
+                        <dd>{formatDate(selectedMessage.receivedAt)}</dd>
+                      </div>
+                      <div>
+                        <dt>来源邮箱</dt>
+                        <dd>{activeProfile?.emailAddress ?? profiles.find((profile) => profile.id === selectedMessage.profileId)?.emailAddress ?? '未知'}</dd>
+                      </div>
+                    </dl>
+                    {sanitizedBodyHtml ? (
+                      <article className="mail-body html" dangerouslySetInnerHTML={{ __html: sanitizedBodyHtml }} />
+                    ) : (
+                      <article className="mail-body plain">{selectedMessage.bodyText}</article>
+                    )}
+                  </>
                 ) : (
-                  <article className="mail-body plain">{selectedMessage.bodyText}</article>
+                  <div className="empty-state">
+                    <Mail size={28} aria-hidden="true" />
+                    <p>选择一封邮件查看正文。</p>
+                  </div>
                 )}
-              </>
-            ) : (
-              <div className="empty-state">
-                <Mail size={28} aria-hidden="true" />
-                <p>选择一封邮件查看正文。</p>
-              </div>
-            )}
-          </section>
+              </section>
+            </>
+          )}
         </section>
       )}
     </main>

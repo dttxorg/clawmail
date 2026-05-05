@@ -288,7 +288,8 @@ describe('App', () => {
     render(<App />);
     await loginAdmin();
 
-    fireEvent.click(screen.getByText('测试邮箱 1'));
+    fireEvent.click(screen.getByRole('button', { name: '时间管理' }));
+    expect(screen.getAllByText(/test-1@claw.email/).length).toBeGreaterThan(0);
     fireEvent.click(screen.getAllByText('7 天')[0]);
     fireEvent.click(screen.getByRole('button', { name: '保存密钥时间' }));
 
@@ -306,7 +307,8 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /日历/ }));
 
-    await screen.findByRole('heading', { name: '日期日历' });
+    await screen.findByRole('heading', { name: '到期日历' });
+    fireEvent.click(screen.getByRole('button', { name: /30.*1 项到期/ }));
     expect(screen.getByText('密钥有效期')).toBeInTheDocument();
     expect(screen.getAllByText(/test-1@claw.email/).length).toBeGreaterThan(0);
   });
