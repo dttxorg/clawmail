@@ -8,6 +8,7 @@ export interface GuestAccessKeyMetadata {
   profileId: string;
   createdAt: string;
   lastUsedAt: string | null;
+  expiresAt: string | null;
 }
 
 export interface GuestAccessKeyResult extends GuestAccessKeyMetadata {
@@ -19,12 +20,14 @@ interface GuestAccessKeyRow {
   encrypted_key: string | null;
   created_at: string;
   last_used_at: string | null;
+  expires_at: string | null;
 }
 
 export interface AccessKeyStore {
   ensureAccessKey(profileId: string): GuestAccessKeyResult | GuestAccessKeyMetadata;
   getAccessKey(profileId: string): GuestAccessKeyResult;
-  rotateAccessKey(profileId: string): GuestAccessKeyResult;
+  rotateAccessKey(profileId: string, expiresAt?: string | null): GuestAccessKeyResult;
+  setAccessKeyExpiration(profileId: string, expiresAt: string | null): GuestAccessKeyMetadata;
   verifyAccessKey(key: string): string | null;
   listAccessKeys(profileIds?: string[]): GuestAccessKeyMetadata[];
   close(): void;
@@ -43,27 +46,40 @@ export function createSqliteAccessKeyStore(databasePath: string, encryptionSecre
     ensureAccessKey(profileId) {
       const existing = activeKeyForProfile(db, profileId);
       if (existing) return mapRow(existing);
-      return insertAccessKey(db, profileId, encryptionSecret);
+      return insertAccessKey(db, profileId, encryptionSecret, null);
     },
     getAccessKey(profileId) {
       const existing = activeKeyForProfile(db, profileId);
-      if (!existing) return insertAccessKey(db, profileId, encryptionSecret);
+      if (!existing) return insertAccessKey(db, profileId, encryptionSecret, null);
 
       const key = decryptAccessKey(existing.encrypted_key, encryptionSecret);
       if (key) return { ...mapRow(existing), key };
 
       const transaction = db.transaction((id: string) => {
         db.prepare('UPDATE guest_access_keys SET revoked_at = CURRENT_TIMESTAMP WHERE profile_id = ? AND revoked_at IS NULL').run(id);
-        return insertAccessKey(db, id, encryptionSecret);
+        return insertAccessKey(db, id, encryptionSecret, null);
       });
       return transaction(profileId);
     },
-    rotateAccessKey(profileId) {
+    rotateAccessKey(profileId, expiresAt = null) {
       const transaction = db.transaction((id: string) => {
         db.prepare('UPDATE guest_access_keys SET revoked_at = CURRENT_TIMESTAMP WHERE profile_id = ? AND revoked_at IS NULL').run(id);
-        return insertAccessKey(db, id, encryptionSecret);
+        return insertAccessKey(db, id, encryptionSecret, expiresAt);
       });
       return transaction(profileId);
+    },
+    setAccessKeyExpiration(profileId, expiresAt) {
+      const existing = activeKeyForProfile(db, profileId);
+      if (!existing) return insertAccessKey(db, profileId, encryptionSecret, expiresAt);
+
+      db.prepare(
+        `
+        UPDATE guest_access_keys
+        SET expires_at = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE profile_id = ? AND revoked_at IS NULL
+        `
+      ).run(expiresAt, profileId);
+      return mapRow(activeKeyForProfile(db, profileId) ?? existing);
     },
     verifyAccessKey(key) {
       if (!isGuestAccessKey(key)) return null;
@@ -73,7 +89,9 @@ export function createSqliteAccessKeyStore(databasePath: string, encryptionSecre
           `
           SELECT profile_id
           FROM guest_access_keys
-          WHERE key_hash = ? AND revoked_at IS NULL
+          WHERE key_hash = ?
+            AND revoked_at IS NULL
+            AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))
           `
         )
         .get(hashAccessKey(key)) as { profile_id: string } | undefined;
@@ -87,7 +105,7 @@ export function createSqliteAccessKeyStore(databasePath: string, encryptionSecre
         ? db
             .prepare(
               `
-              SELECT profile_id, created_at, last_used_at
+              SELECT profile_id, created_at, last_used_at, expires_at
               FROM guest_access_keys
               WHERE revoked_at IS NULL AND profile_id IN (${profileIds.map(() => '?').join(',')})
               ORDER BY created_at DESC
@@ -97,7 +115,7 @@ export function createSqliteAccessKeyStore(databasePath: string, encryptionSecre
         : db
             .prepare(
               `
-              SELECT profile_id, created_at, last_used_at
+              SELECT profile_id, created_at, last_used_at, expires_at
               FROM guest_access_keys
               WHERE revoked_at IS NULL
               ORDER BY created_at DESC
@@ -119,9 +137,11 @@ function migrate(db: DatabaseConnection): void {
       profile_id TEXT NOT NULL,
       key_hash TEXT NOT NULL UNIQUE,
       encrypted_key TEXT,
+      expires_at TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       last_used_at TEXT,
-      revoked_at TEXT
+      revoked_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE INDEX IF NOT EXISTS idx_guest_access_keys_profile
@@ -137,13 +157,19 @@ function migrate(db: DatabaseConnection): void {
   if (!columns.has('encrypted_key')) {
     db.exec('ALTER TABLE guest_access_keys ADD COLUMN encrypted_key TEXT');
   }
+  if (!columns.has('expires_at')) {
+    db.exec('ALTER TABLE guest_access_keys ADD COLUMN expires_at TEXT');
+  }
+  if (!columns.has('updated_at')) {
+    db.exec('ALTER TABLE guest_access_keys ADD COLUMN updated_at TEXT');
+  }
 }
 
 function activeKeyForProfile(db: DatabaseConnection, profileId: string): GuestAccessKeyRow | null {
   const row = db
     .prepare(
       `
-      SELECT profile_id, encrypted_key, created_at, last_used_at
+      SELECT profile_id, encrypted_key, created_at, last_used_at, expires_at
       FROM guest_access_keys
       WHERE profile_id = ? AND revoked_at IS NULL
       ORDER BY created_at DESC
@@ -154,15 +180,15 @@ function activeKeyForProfile(db: DatabaseConnection, profileId: string): GuestAc
   return row ?? null;
 }
 
-function insertAccessKey(db: DatabaseConnection, profileId: string, encryptionSecret: string): GuestAccessKeyResult {
+function insertAccessKey(db: DatabaseConnection, profileId: string, encryptionSecret: string, expiresAt: string | null): GuestAccessKeyResult {
   const key = createGuestAccessKey();
   const id = randomBytes(16).toString('hex');
   db.prepare(
     `
-    INSERT INTO guest_access_keys (id, profile_id, key_hash, encrypted_key)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO guest_access_keys (id, profile_id, key_hash, encrypted_key, expires_at)
+    VALUES (?, ?, ?, ?, ?)
     `
-  ).run(id, profileId, hashAccessKey(key), encryptAccessKey(key, encryptionSecret));
+  ).run(id, profileId, hashAccessKey(key), encryptAccessKey(key, encryptionSecret), expiresAt);
 
   const row = activeKeyForProfile(db, profileId);
   if (!row) throw new Error('访客密钥生成失败。');
@@ -173,7 +199,8 @@ function mapRow(row: GuestAccessKeyRow): GuestAccessKeyMetadata {
   return {
     profileId: row.profile_id,
     createdAt: row.created_at,
-    lastUsedAt: row.last_used_at
+    lastUsedAt: row.last_used_at,
+    expiresAt: row.expires_at
   };
 }
 

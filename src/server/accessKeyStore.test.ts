@@ -17,6 +17,10 @@ describe('SQLite guest access key store', () => {
     const rotated = store.rotateAccessKey('profile-1');
     expect(store.verifyAccessKey(key)).toBeNull();
     expect(store.verifyAccessKey(rotated.key)).toBe('profile-1');
+    expect(store.setAccessKeyExpiration('profile-1', '2026-05-30T00:00:00.000Z')).toMatchObject({
+      profileId: 'profile-1',
+      expiresAt: '2026-05-30T00:00:00.000Z'
+    });
 
     store.close();
   });

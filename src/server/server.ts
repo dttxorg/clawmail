@@ -2,7 +2,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createReadStream, existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
 import { createRealClawCliAdapter } from '../main/clawCliAdapter';
 import { createSqliteCacheStore } from '../main/cacheStore';
 import type { MailSummary, MailboxProfile } from '../shared/types';
@@ -11,6 +10,8 @@ import { createEncryptedFileSecretStore } from './encryptedFileSecretStore';
 import { RefreshManager } from './refreshManager';
 import { GuestRefreshLimiter } from './guestRefreshLimiter';
 import { MessageReadManager } from './messageReadManager';
+import { createSqliteAdminStore, type AdminStore } from './adminStore';
+import { createSqliteMailboxExpirationStore, type MailboxExpirationStore } from './mailboxExpirationStore';
 
 interface ServerConfig {
   port: number;
@@ -42,9 +43,6 @@ export function loadServerConfig(env = process.env): ServerConfig {
   const adminPassword = env.CLAWMAIL_ADMIN_PASSWORD || '';
   const masterKey = env.CLAWMAIL_MASTER_KEY || '';
 
-  if (isProduction && !adminPassword) {
-    throw new Error('生产环境必须设置 CLAWMAIL_ADMIN_PASSWORD。');
-  }
   if (isProduction && !masterKey) {
     throw new Error('生产环境必须设置 CLAWMAIL_MASTER_KEY。');
   }
@@ -68,6 +66,8 @@ export async function createClawMailServer(config = loadServerConfig()) {
 
   const cacheStore = createSqliteCacheStore(config.databasePath);
   const accessKeyStore = createSqliteAccessKeyStore(config.databasePath, config.masterKey);
+  const adminStore = createSqliteAdminStore(config.databasePath, config.adminUsername, config.adminPassword);
+  const mailboxExpirationStore = createSqliteMailboxExpirationStore(config.databasePath);
   const secretStore = createEncryptedFileSecretStore(config.secretFilePath, config.masterKey);
   const adapter = createRealClawCliAdapter({ cacheStore, secretStore });
   const refreshManager = new RefreshManager(adapter, config.refreshCooldownMs);
@@ -90,6 +90,8 @@ export async function createClawMailServer(config = loadServerConfig()) {
           config,
           adapter,
           accessKeyStore,
+          adminStore,
+          mailboxExpirationStore,
           refreshManager,
           guestRefreshLimiter,
           messageReadManager
@@ -112,6 +114,8 @@ export async function createClawMailServer(config = loadServerConfig()) {
   server.on('close', () => {
     cacheStore.close();
     accessKeyStore.close();
+    adminStore.close();
+    mailboxExpirationStore.close();
   });
 
   return server;
@@ -123,12 +127,14 @@ async function routeApi(
     config: ServerConfig;
     adapter: ReturnType<typeof createRealClawCliAdapter>;
     accessKeyStore: AccessKeyStore;
+    adminStore: AdminStore;
+    mailboxExpirationStore: MailboxExpirationStore;
     refreshManager: RefreshManager;
     guestRefreshLimiter: GuestRefreshLimiter;
     messageReadManager: MessageReadManager;
   }
 ): Promise<void> {
-  const { adapter, accessKeyStore, config, refreshManager, guestRefreshLimiter, messageReadManager } = dependencies;
+  const { adapter, accessKeyStore, adminStore, mailboxExpirationStore, config, refreshManager, guestRefreshLimiter, messageReadManager } = dependencies;
 
   if (ctx.method === 'GET' && ctx.path === '/api/health') {
     writeJson(ctx.res, 200, { ok: true });
@@ -136,13 +142,35 @@ async function routeApi(
   }
 
   if (ctx.path.startsWith('/api/admin/')) {
-    requireAdmin(ctx, config);
+    const adminSession = requireAdmin(ctx, config, adminStore);
+
+    if (ctx.method === 'GET' && ctx.path === '/api/admin/session') {
+      writeJson(ctx.res, 200, { username: config.adminUsername, mustChangePassword: adminSession.mustChangePassword });
+      return;
+    }
+
+    if (ctx.method === 'PUT' && ctx.path === '/api/admin/password') {
+      const body = await readJsonBody(ctx.req);
+      const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+      const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
+      if (newPassword.length < 6) throw new HttpError(422, 'VALIDATION_ERROR', '新密码至少需要 6 位。');
+      const result = adminStore.changePassword(config.adminUsername, currentPassword, newPassword);
+      if (!result.ok) throw new HttpError(403, 'INVALID_PASSWORD', '当前密码不正确。');
+      writeJson(ctx.res, 200, { ok: true, mustChangePassword: false, message: '管理员密码已更新。' });
+      return;
+    }
 
     if (ctx.method === 'GET' && ctx.path === '/api/admin/mailboxes') {
       const profiles = await adapter.listProfiles();
       writeJson(ctx.res, 200, {
-        profiles: profiles.map((profile) => withAccessKeyMetadata(profile, accessKeyStore))
+        profiles: profiles.map((profile) => withAccessKeyMetadata(profile, accessKeyStore, mailboxExpirationStore))
       });
+      return;
+    }
+
+    if (ctx.method === 'GET' && ctx.path === '/api/admin/calendar') {
+      const profiles = await adapter.listProfiles();
+      writeJson(ctx.res, 200, { items: buildCalendarItems(profiles, accessKeyStore, mailboxExpirationStore) });
       return;
     }
 
@@ -192,7 +220,9 @@ async function routeApi(
       if (ctx.method === 'POST' && action === 'guest-key') {
         const profile = (await adapter.listProfiles()).find((item) => item.id === profileId);
         if (!profile) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮箱。');
-        writeJson(ctx.res, 201, accessKeyStore.rotateAccessKey(profile.id));
+        const body = await readOptionalJsonBody(ctx.req);
+        const expiresAt = normalizeExpiresAt(body.expiresAt);
+        writeJson(ctx.res, 201, accessKeyStore.rotateAccessKey(profile.id, expiresAt));
         return;
       }
 
@@ -200,6 +230,22 @@ async function routeApi(
         const profile = (await adapter.listProfiles()).find((item) => item.id === profileId);
         if (!profile) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮箱。');
         writeJson(ctx.res, 200, accessKeyStore.getAccessKey(profile.id));
+        return;
+      }
+
+      if (ctx.method === 'PATCH' && action === 'guest-key-expiration') {
+        const profile = (await adapter.listProfiles()).find((item) => item.id === profileId);
+        if (!profile) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮箱。');
+        const body = await readJsonBody(ctx.req);
+        writeJson(ctx.res, 200, accessKeyStore.setAccessKeyExpiration(profile.id, normalizeExpiresAt(body.expiresAt)));
+        return;
+      }
+
+      if (ctx.method === 'PATCH' && action === 'expiration') {
+        const profile = (await adapter.listProfiles()).find((item) => item.id === profileId);
+        if (!profile) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮箱。');
+        const body = await readJsonBody(ctx.req);
+        writeJson(ctx.res, 200, mailboxExpirationStore.setExpiration(profile.id, normalizeExpiresAt(body.expiresAt)));
         return;
       }
 
@@ -291,17 +337,55 @@ async function buildGuestMailbox(adapter: ReturnType<typeof createRealClawCliAda
   return { profile, messages };
 }
 
-function withAccessKeyMetadata(profile: MailboxProfile, accessKeyStore: AccessKeyStore) {
+function withAccessKeyMetadata(profile: MailboxProfile, accessKeyStore: AccessKeyStore, mailboxExpirationStore: MailboxExpirationStore) {
   const metadata = accessKeyStore.listAccessKeys([profile.id])[0] ?? null;
+  const mailboxExpiration = mailboxExpirationStore.getExpiration(profile.id);
   return {
     ...profile,
+    mailboxExpiresAt: mailboxExpiration?.expiresAt ?? null,
     guestAccessKey: metadata
       ? {
           createdAt: metadata.createdAt,
-          lastUsedAt: metadata.lastUsedAt
+          lastUsedAt: metadata.lastUsedAt,
+          expiresAt: metadata.expiresAt
         }
       : null
   };
+}
+
+function buildCalendarItems(
+  profiles: MailboxProfile[],
+  accessKeyStore: AccessKeyStore,
+  mailboxExpirationStore: MailboxExpirationStore
+) {
+  const profileMap = new Map(profiles.map((profile) => [profile.id, profile]));
+  const keyItems = accessKeyStore
+    .listAccessKeys(profiles.map((profile) => profile.id))
+    .filter((item) => item.expiresAt)
+    .map((item) => {
+      const profile = profileMap.get(item.profileId);
+      return {
+        type: 'key',
+        profileId: item.profileId,
+        emailAddress: profile?.emailAddress ?? item.profileId,
+        displayName: profile?.displayName ?? item.profileId,
+        expiresAt: item.expiresAt
+      };
+    });
+  const mailboxItems = mailboxExpirationStore
+    .listExpirations(profiles.map((profile) => profile.id))
+    .filter((item) => item.expiresAt)
+    .map((item) => {
+      const profile = profileMap.get(item.profileId);
+      return {
+        type: 'mailbox',
+        profileId: item.profileId,
+        emailAddress: profile?.emailAddress ?? item.profileId,
+        displayName: profile?.displayName ?? item.profileId,
+        expiresAt: item.expiresAt
+      };
+    });
+  return [...keyItems, ...mailboxItems].sort((a, b) => String(a.expiresAt).localeCompare(String(b.expiresAt)));
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -326,7 +410,12 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
   }
 }
 
-function requireAdmin(ctx: RequestContext, config: ServerConfig): void {
+async function readOptionalJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  if (Number(req.headers['content-length'] ?? 0) === 0) return {};
+  return readJsonBody(req);
+}
+
+function requireAdmin(ctx: RequestContext, config: ServerConfig, adminStore: AdminStore) {
   const header = ctx.req.headers.authorization || '';
   const [scheme, token] = header.split(' ');
   if (scheme !== 'Basic' || !token) {
@@ -338,10 +427,17 @@ function requireAdmin(ctx: RequestContext, config: ServerConfig): void {
   const splitAt = decoded.indexOf(':');
   const username = splitAt >= 0 ? decoded.slice(0, splitAt) : '';
   const password = splitAt >= 0 ? decoded.slice(splitAt + 1) : '';
-  if (username !== config.adminUsername || !safeEqual(password, config.adminPassword)) {
+  if (username !== config.adminUsername) {
     writeAuthRequired(ctx.res);
     throw new ResponseAlreadySent();
   }
+
+  const result = adminStore.verify(username, password);
+  if (!result.ok) {
+    writeAuthRequired(ctx.res);
+    throw new ResponseAlreadySent();
+  }
+  return result;
 }
 
 function requireGuestProfileId(ctx: RequestContext, accessKeyStore: AccessKeyStore): string {
@@ -351,18 +447,20 @@ function requireGuestProfileId(ctx: RequestContext, accessKeyStore: AccessKeySto
   return profileId;
 }
 
+function normalizeExpiresAt(value: unknown): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'string') throw new HttpError(422, 'VALIDATION_ERROR', '有效时间格式无效。');
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new HttpError(422, 'VALIDATION_ERROR', '有效时间格式无效。');
+  return date.toISOString();
+}
+
 function writeAuthRequired(res: ServerResponse): void {
   res.writeHead(401, {
     'content-type': 'application/json; charset=utf-8',
     'www-authenticate': 'Basic realm="ClawMail Admin"'
   });
   res.end(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: '请先登录管理员账号。' } }));
-}
-
-function safeEqual(input: string, expected: string): boolean {
-  const inputHash = Buffer.from(input);
-  const expectedHash = Buffer.from(expected);
-  return inputHash.length === expectedHash.length && timingSafeEqual(inputHash, expectedHash);
 }
 
 function serveStatic(ctx: RequestContext, staticDir: string): void {

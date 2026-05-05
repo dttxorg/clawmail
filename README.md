@@ -6,13 +6,14 @@ ClawMail is a Docker-ready ClawEmail inbox. It keeps the original IMAP-based mai
 - Guest: enter a mailbox-specific key to access only that mailbox.
 
 Guest access triggers an on-demand refresh for that mailbox only. There is no global background refresh, so large mailbox counts do not block the whole service.
+The default admin account is `admin` / `admin`; the first login asks you to change the password.
 
 ## Run With Docker Compose
 
 Edit `docker-compose.yml` before first launch:
 
 - `CLAWMAIL_ADMIN_USERNAME`: admin username.
-- `CLAWMAIL_ADMIN_PASSWORD`: admin password.
+- `CLAWMAIL_ADMIN_PASSWORD`: initial admin password, defaults to `admin`.
 - `CLAWMAIL_MASTER_KEY`: stable encryption key for stored IMAP credentials. Do not change it after mailboxes are added.
 - `CLAWMAIL_REFRESH_COOLDOWN_MS`: per-mailbox guest refresh cooldown.
 
@@ -42,4 +43,5 @@ Open `http://127.0.0.1:8080`.
 
 - IMAP auth codes are encrypted before being written to disk.
 - Guest keys are stored as hashes in SQLite and are only shown once when generated or reset.
+- Change the default admin password on first login.
 - Use HTTPS in front of the container for public network access.

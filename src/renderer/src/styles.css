@@ -160,6 +160,12 @@ textarea {
   color: #ffffff;
 }
 
+.button.secondary {
+  border-color: #cfd8e3;
+  background: #ffffff;
+  color: #243241;
+}
+
 .button.full {
   width: 100%;
 }
@@ -191,9 +197,12 @@ textarea {
   background: #f8fafb;
 }
 
+.admin-tabs,
 .add-mailbox,
 .generated-key,
-.guest-profile {
+.guest-profile,
+.validity-panel,
+.calendar-list {
   display: grid;
   gap: 10px;
   margin-bottom: 14px;
@@ -204,6 +213,8 @@ textarea {
 .add-mailbox h2,
 .generated-key h2,
 .guest-profile h2,
+.validity-panel h2,
+.calendar-list h2,
 .panel-header h2,
 .detail-header h2 {
   margin: 0;
@@ -223,6 +234,57 @@ textarea {
   grid-template-columns: minmax(0, 1fr) 34px;
   align-items: center;
   gap: 8px;
+}
+
+.admin-tabs {
+  grid-template-columns: 1fr 1fr;
+}
+
+.admin-tabs button,
+.quick-days button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid #cfd8e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #243241;
+}
+
+.admin-tabs button.active {
+  border-color: #9bc5b7;
+  background: #e8f3ef;
+}
+
+.quick-days {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.validity-panel label {
+  margin-top: 4px;
+}
+
+.calendar-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #d9e0e7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.calendar-row span {
+  color: #206a5d;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.calendar-row small {
+  color: #66727f;
 }
 
 code {

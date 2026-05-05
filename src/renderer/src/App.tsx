@@ -5,6 +5,7 @@ import {
   Copy,
   KeyRound,
   Eye,
+  CalendarDays,
   Lock,
   Mail,
   Plus,
@@ -16,6 +17,7 @@ import {
 import type { MailDetail, MailSummary, MailboxProfile, SyncResult } from '../../shared/types';
 
 type Mode = 'guest' | 'admin';
+type AdminView = 'inbox' | 'calendar';
 
 interface AdminCredentials {
   username: string;
@@ -26,7 +28,9 @@ interface AdminProfile extends MailboxProfile {
   guestAccessKey: {
     createdAt: string;
     lastUsedAt: string | null;
+    expiresAt: string | null;
   } | null;
+  mailboxExpiresAt: string | null;
 }
 
 interface GuestRefresh {
@@ -44,6 +48,20 @@ interface GuestMailboxPayload {
 interface GeneratedGuestKey {
   profileId: string;
   key: string;
+  expiresAt?: string | null;
+}
+
+interface AdminSession {
+  username: string;
+  mustChangePassword: boolean;
+}
+
+interface CalendarItem {
+  type: 'key' | 'mailbox';
+  profileId: string;
+  emailAddress: string;
+  displayName: string;
+  expiresAt: string;
 }
 
 interface ApiErrorBody {
@@ -62,6 +80,47 @@ function formatDate(value: string | null): string {
     hour: '2-digit',
     minute: '2-digit'
   }).format(new Date(value));
+}
+
+function formatFullDate(value: string | null): string {
+  if (!value) return '不限';
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(new Date(value));
+}
+
+function formatCountdown(value: string | null): string {
+  if (!value) return '不限';
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) return '时间无效';
+  const days = Math.ceil((time - Date.now()) / 86_400_000);
+  if (days > 0) return `剩余 ${days} 天`;
+  if (days === 0) return '今天到期';
+  return `已到期 ${Math.abs(days)} 天`;
+}
+
+function formatDateTimeLocal(value: string | null | undefined): string {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function toIsoFromDateTimeLocal(value: string): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function daysFromNowLocal(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return formatDateTimeLocal(date.toISOString());
 }
 
 function basicAuth(credentials: AdminCredentials): string {
@@ -151,8 +210,12 @@ export function App() {
   const [mode, setMode] = useState<Mode>('guest');
   const [admin, setAdmin] = useState<AdminCredentials>({ username: 'admin', password: '' });
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [adminView, setAdminView] = useState<AdminView>('inbox');
   const [guestKey, setGuestKey] = useState(initialGuestKey);
   const [profiles, setProfiles] = useState<AdminProfile[]>([]);
+  const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
   const [guestProfile, setGuestProfile] = useState<MailboxProfile | null>(null);
   const [messages, setMessages] = useState<MailSummary[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState('all');
@@ -161,6 +224,8 @@ export function App() {
   const [messageDetails, setMessageDetails] = useState<Record<string, MailDetail>>({});
   const [authUrl, setAuthUrl] = useState('');
   const [generatedKeys, setGeneratedKeys] = useState<GeneratedGuestKey[]>([]);
+  const [keyExpiresAtDraft, setKeyExpiresAtDraft] = useState('');
+  const [mailboxExpiresAtDraft, setMailboxExpiresAtDraft] = useState('');
   const [notice, setNotice] = useState('Docker Web 模式：不会后台刷新全部邮箱，只有管理员手动刷新或访客密钥访问时刷新对应邮箱。');
   const [isBusy, setIsBusy] = useState(false);
 
@@ -181,15 +246,67 @@ export function App() {
     setSelectedMessageId((current) => current ?? nextMessages[0]?.id ?? null);
   }
 
+  async function loadCalendar(credentials = admin) {
+    const result = await requestJson<{ items: CalendarItem[] }>('/api/admin/calendar', { admin: credentials });
+    setCalendarItems(result.items);
+  }
+
+  async function switchAdminView(view: AdminView) {
+    setAdminView(view);
+    if (view === 'calendar') {
+      try {
+        await loadCalendar();
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : '读取日历失败。');
+      }
+    }
+  }
+
   async function signInAdmin() {
     setIsBusy(true);
     try {
-      await loadAdminData(admin);
+      const session = await requestJson<AdminSession>('/api/admin/session', { admin });
       setIsAdminAuthenticated(true);
+      setMustChangePassword(session.mustChangePassword);
+      setPasswordForm({ currentPassword: admin.password, newPassword: '', confirmPassword: '' });
       setMode('admin');
-      setNotice('管理员已登录。');
+      if (session.mustChangePassword) {
+        setNotice('首次登录请修改默认管理员密码。');
+      } else {
+        await loadAdminData(admin);
+        setNotice('管理员已登录。');
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '管理员登录失败。');
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function changeAdminPassword() {
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      setNotice('两次输入的新密码不一致。');
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      await requestJson<{ ok: boolean; message: string }>('/api/admin/password', {
+        method: 'PUT',
+        body: {
+          currentPassword: passwordForm.currentPassword,
+          newPassword: passwordForm.newPassword
+        },
+        admin
+      });
+      const nextAdmin = { ...admin, password: passwordForm.newPassword };
+      setAdmin(nextAdmin);
+      setMustChangePassword(false);
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      await loadAdminData(nextAdmin);
+      setNotice('管理员密码已更新。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '修改密码失败。');
     } finally {
       setIsBusy(false);
     }
@@ -270,13 +387,42 @@ export function App() {
     try {
       const result = await requestJson<GeneratedGuestKey>(`/api/admin/mailboxes/${encodeURIComponent(profileId)}/guest-key`, {
         method: 'POST',
-        admin
+        admin,
+        body: { expiresAt: toIsoFromDateTimeLocal(keyExpiresAtDraft) }
       });
       setGeneratedKeys([result]);
       await loadAdminData();
       setNotice('访客密钥已重置，新密钥只显示这一次。');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '重置密钥失败。');
+    }
+  }
+
+  async function updateKeyExpiration(profileId: string) {
+    try {
+      await requestJson(`/api/admin/mailboxes/${encodeURIComponent(profileId)}/guest-key-expiration`, {
+        method: 'PATCH',
+        admin,
+        body: { expiresAt: toIsoFromDateTimeLocal(keyExpiresAtDraft) }
+      });
+      await Promise.all([loadAdminData(), loadCalendar()]);
+      setNotice('访客密钥有效期已更新。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '更新密钥有效期失败。');
+    }
+  }
+
+  async function updateMailboxExpiration(profileId: string) {
+    try {
+      await requestJson(`/api/admin/mailboxes/${encodeURIComponent(profileId)}/expiration`, {
+        method: 'PATCH',
+        admin,
+        body: { expiresAt: toIsoFromDateTimeLocal(mailboxExpiresAtDraft) }
+      });
+      await Promise.all([loadAdminData(), loadCalendar()]);
+      setNotice('邮箱订阅到期时间已更新。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '更新邮箱订阅到期时间失败。');
     }
   }
 
@@ -320,6 +466,13 @@ export function App() {
   useEffect(() => {
     if (initialGuestKey) void enterGuest();
   }, []);
+
+  useEffect(() => {
+    if (mode !== 'admin' || selectedProfileId === 'all' || !activeProfile) return;
+    const adminProfile = profiles.find((profile) => profile.id === activeProfile.id);
+    setKeyExpiresAtDraft(formatDateTimeLocal(adminProfile?.guestAccessKey?.expiresAt));
+    setMailboxExpiresAtDraft(formatDateTimeLocal(adminProfile?.mailboxExpiresAt));
+  }, [activeProfile?.id, mode, profiles, selectedProfileId]);
 
   useEffect(() => {
     if (!selectedMessageId) {
@@ -393,6 +546,22 @@ export function App() {
             登录
           </button>
         </section>
+      ) : mode === 'admin' && isAdminAuthenticated && mustChangePassword ? (
+        <section className="auth-panel" aria-label="修改管理员密码">
+          <Lock size={24} aria-hidden="true" />
+          <h2>修改默认密码</h2>
+          <p>默认管理员账号和密码都是 admin。首次登录后请先设置新密码。</p>
+          <label htmlFor="current-password">当前密码</label>
+          <input id="current-password" type="password" value={passwordForm.currentPassword} onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })} />
+          <label htmlFor="new-password">新密码</label>
+          <input id="new-password" type="password" value={passwordForm.newPassword} onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })} />
+          <label htmlFor="confirm-password">确认新密码</label>
+          <input id="confirm-password" type="password" value={passwordForm.confirmPassword} onChange={(event) => setPasswordForm({ ...passwordForm, confirmPassword: event.target.value })} />
+          <button className="button primary" type="button" onClick={changeAdminPassword} disabled={isBusy}>
+            <ShieldCheck size={16} aria-hidden="true" />
+            保存新密码
+          </button>
+        </section>
       ) : mode === 'guest' && !guestProfile ? (
         <section className="auth-panel" aria-label="访客密钥访问">
           <KeyRound size={24} aria-hidden="true" />
@@ -410,6 +579,17 @@ export function App() {
           <aside className="sidebar" aria-label="邮箱列表">
             {mode === 'admin' ? (
               <>
+                <div className="admin-tabs" aria-label="管理视图">
+                  <button className={adminView === 'inbox' ? 'active' : ''} type="button" onClick={() => void switchAdminView('inbox')}>
+                    <Mail size={15} aria-hidden="true" />
+                    邮箱
+                  </button>
+                  <button className={adminView === 'calendar' ? 'active' : ''} type="button" onClick={() => void switchAdminView('calendar')}>
+                    <CalendarDays size={15} aria-hidden="true" />
+                    日历
+                  </button>
+                </div>
+
                 <section className="add-mailbox">
                   <h2>添加邮箱</h2>
                   <textarea
@@ -435,41 +615,92 @@ export function App() {
                         </button>
                       </div>
                     ))}
-                    <small>密钥只显示这一次，丢失后请重置。</small>
+                    <small>完整密钥可复制；如设置有效期，到期后访客将无法进入。</small>
                   </section>
                 )}
 
-                <button className={`nav-row ${selectedProfileId === 'all' ? 'active' : ''}`} type="button" onClick={() => setSelectedProfileId('all')}>
-                  <Mail size={17} aria-hidden="true" />
-                  <span>全部缓存邮件</span>
-                  <strong>{messages.length}</strong>
-                </button>
-                {profiles.map((profile) => (
-                  <div className={`profile-row ${selectedProfileId === profile.id ? 'active' : ''}`} key={profile.id}>
-                    <button className="profile-select" type="button" onClick={() => setSelectedProfileId(profile.id)}>
-                      <span className={`status-dot ${profile.status.toLowerCase()}`} />
-                      <span>
-                        <strong>{profile.displayName}</strong>
-                        <small>{profile.emailAddress}</small>
-                        <small>最后同步：{formatDate(profile.lastSyncAt)}</small>
-                      </span>
-                    </button>
-                    <div className="profile-actions">
-                      <button className="icon-button" type="button" onClick={() => refreshProfile(profile.id)} aria-label="刷新邮箱">
-                        <RefreshCw size={15} aria-hidden="true" />
-                      </button>
-                      <button className="icon-button" type="button" onClick={() => viewGuestKey(profile.id)} aria-label="查看访客密钥">
-                        <Eye size={15} aria-hidden="true" />
-                      </button>
-                      <button className="icon-button" type="button" onClick={() => rotateGuestKey(profile.id)} aria-label="重置访客密钥">
-                        <KeyRound size={15} aria-hidden="true" />
-                      </button>
-                      <button className="icon-button danger" type="button" onClick={() => deleteProfile(profile)} aria-label="删除邮箱">
-                        <Trash2 size={15} aria-hidden="true" />
-                      </button>
+                {selectedProfileId !== 'all' && activeProfile && (
+                  <section className="validity-panel">
+                    <h2>时间管理</h2>
+                    <label htmlFor="key-expires-at">密钥有效时间</label>
+                    <input id="key-expires-at" type="datetime-local" value={keyExpiresAtDraft} onChange={(event) => setKeyExpiresAtDraft(event.target.value)} />
+                    <div className="quick-days">
+                      {[7, 14, 30].map((days) => (
+                        <button type="button" key={`key-${days}`} onClick={() => setKeyExpiresAtDraft(daysFromNowLocal(days))}>
+                          {days} 天
+                        </button>
+                      ))}
+                      <button type="button" onClick={() => setKeyExpiresAtDraft('')}>不限</button>
                     </div>
-                  </div>
-                ))}
+                    <button className="button secondary full" type="button" onClick={() => updateKeyExpiration(activeProfile.id)}>
+                      保存密钥时间
+                    </button>
+
+                    <label htmlFor="mailbox-expires-at">邮箱订阅到期时间</label>
+                    <input id="mailbox-expires-at" type="datetime-local" value={mailboxExpiresAtDraft} onChange={(event) => setMailboxExpiresAtDraft(event.target.value)} />
+                    <small>{formatCountdown(toIsoFromDateTimeLocal(mailboxExpiresAtDraft))}</small>
+                    <div className="quick-days">
+                      {[7, 14, 30].map((days) => (
+                        <button type="button" key={`mailbox-${days}`} onClick={() => setMailboxExpiresAtDraft(daysFromNowLocal(days))}>
+                          {days} 天
+                        </button>
+                      ))}
+                      <button type="button" onClick={() => setMailboxExpiresAtDraft('')}>不限</button>
+                    </div>
+                    <button className="button secondary full" type="button" onClick={() => updateMailboxExpiration(activeProfile.id)}>
+                      保存订阅到期
+                    </button>
+                  </section>
+                )}
+
+                {adminView === 'inbox' ? (
+                  <>
+                    <button className={`nav-row ${selectedProfileId === 'all' ? 'active' : ''}`} type="button" onClick={() => setSelectedProfileId('all')}>
+                      <Mail size={17} aria-hidden="true" />
+                      <span>全部缓存邮件</span>
+                      <strong>{messages.length}</strong>
+                    </button>
+                    {profiles.map((profile) => (
+                      <div className={`profile-row ${selectedProfileId === profile.id ? 'active' : ''}`} key={profile.id}>
+                        <button className="profile-select" type="button" onClick={() => setSelectedProfileId(profile.id)}>
+                          <span className={`status-dot ${profile.status.toLowerCase()}`} />
+                          <span>
+                            <strong>{profile.displayName}</strong>
+                            <small>{profile.emailAddress}</small>
+                            <small>最后同步：{formatDate(profile.lastSyncAt)}</small>
+                            <small>订阅到期：{formatFullDate(profile.mailboxExpiresAt)} · {formatCountdown(profile.mailboxExpiresAt)}</small>
+                          </span>
+                        </button>
+                        <div className="profile-actions">
+                          <button className="icon-button" type="button" onClick={() => refreshProfile(profile.id)} aria-label="刷新邮箱">
+                            <RefreshCw size={15} aria-hidden="true" />
+                          </button>
+                          <button className="icon-button" type="button" onClick={() => viewGuestKey(profile.id)} aria-label="查看访客密钥">
+                            <Eye size={15} aria-hidden="true" />
+                          </button>
+                          <button className="icon-button" type="button" onClick={() => rotateGuestKey(profile.id)} aria-label="重置访客密钥">
+                            <KeyRound size={15} aria-hidden="true" />
+                          </button>
+                          <button className="icon-button danger" type="button" onClick={() => deleteProfile(profile)} aria-label="删除邮箱">
+                            <Trash2 size={15} aria-hidden="true" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                ) : (
+                  <section className="calendar-list" aria-label="时间日历">
+                    <h2>日期日历</h2>
+                    {calendarItems.length === 0 && <p className="empty-copy">暂无设置有效时间的密钥或邮箱订阅到期时间。</p>}
+                    {calendarItems.map((item) => (
+                      <article className="calendar-row" key={`${item.type}-${item.profileId}-${item.expiresAt}`}>
+                        <span>{item.type === 'key' ? '密钥有效期' : '邮箱订阅到期'}</span>
+                        <strong>{formatFullDate(item.expiresAt)}</strong>
+                        <small>{item.displayName} · {item.emailAddress} · {formatCountdown(item.expiresAt)}</small>
+                      </article>
+                    ))}
+                  </section>
+                )}
               </>
             ) : (
               guestProfile && (

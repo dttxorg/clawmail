@@ -12,7 +12,12 @@ const profiles = [
     lastSyncAt: '2026-04-30T09:00:00.000Z',
     lastSyncMessage: '同步成功',
     unreadCount: 1,
-    guestAccessKey: null
+    mailboxExpiresAt: null,
+    guestAccessKey: {
+      createdAt: '2026-04-30T09:00:00.000Z',
+      lastUsedAt: null,
+      expiresAt: null
+    }
   }
 ];
 
@@ -43,8 +48,27 @@ function mockFetch() {
     const url = String(input);
     const method = init?.method ?? 'GET';
 
+    if (url === '/api/admin/session' && method === 'GET') {
+      return jsonResponse({ username: 'admin', mustChangePassword: false });
+    }
+    if (url === '/api/admin/password' && method === 'PUT') {
+      return jsonResponse({ ok: true, mustChangePassword: false, message: '管理员密码已更新。' });
+    }
     if (url === '/api/admin/mailboxes' && method === 'GET') {
       return jsonResponse({ profiles });
+    }
+    if (url === '/api/admin/calendar' && method === 'GET') {
+      return jsonResponse({
+        items: [
+          {
+            type: 'key',
+            profileId: 'profile-1',
+            emailAddress: 'test-1@claw.email',
+            displayName: '测试邮箱 1',
+            expiresAt: '2026-05-30T09:00:00.000Z'
+          }
+        ]
+      });
     }
     if (url === '/api/admin/messages' && method === 'GET') {
       return jsonResponse({ messages });
@@ -71,6 +95,12 @@ function mockFetch() {
     }
     if (url === '/api/admin/mailboxes/profile-1/guest-key' && method === 'GET') {
       return jsonResponse({ profileId: 'profile-1', key: 'ck_guest_visible_key_123456789012345678' });
+    }
+    if (url === '/api/admin/mailboxes/profile-1/guest-key-expiration' && method === 'PATCH') {
+      return jsonResponse({ profileId: 'profile-1', expiresAt: '2026-05-30T09:00:00.000Z' });
+    }
+    if (url === '/api/admin/mailboxes/profile-1/expiration' && method === 'PATCH') {
+      return jsonResponse({ profileId: 'profile-1', expiresAt: '2026-05-30T09:00:00.000Z' });
     }
     if (url === '/api/admin/mailboxes/profile-1' && method === 'DELETE') {
       return jsonResponse({ ok: true, profileId: 'profile-1', message: '已删除账号 test-1@claw.email。' });
@@ -126,6 +156,35 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /管理员/ }));
 
     expect(screen.getByRole('heading', { name: '管理员登录' })).toBeInTheDocument();
+  });
+
+  it('requires password change when the admin still uses the default password', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url === '/api/admin/session' && method === 'GET') {
+        return jsonResponse({ username: 'admin', mustChangePassword: true });
+      }
+      if (url === '/api/admin/password' && method === 'PUT') {
+        return jsonResponse({ ok: true, message: '管理员密码已更新。' });
+      }
+      if (url === '/api/admin/mailboxes' && method === 'GET') return jsonResponse({ profiles });
+      if (url === '/api/admin/messages' && method === 'GET') return jsonResponse({ messages });
+      if (url === '/api/admin/messages/mail-1' && method === 'GET') return jsonResponse({ ...messages[0], bodyText: '测试正文' });
+      return jsonResponse({ error: { message: 'Unhandled' } }, false, 404);
+    }));
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: /管理员/ }));
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'admin' } });
+    fireEvent.click(screen.getByRole('button', { name: /登录/ }));
+
+    await screen.findByRole('heading', { name: '修改默认密码' });
+    fireEvent.change(screen.getByLabelText('新密码'), { target: { value: 'new-admin' } });
+    fireEvent.change(screen.getByLabelText('确认新密码'), { target: { value: 'new-admin' } });
+    fireEvent.click(screen.getByRole('button', { name: /保存新密码/ }));
+
+    await screen.findByText('测试邮件');
   });
 
   it('loads the admin inbox without import or export controls', async () => {
@@ -222,5 +281,33 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '重置访客密钥' }));
     await screen.findByText('ck_guest_rotated_key_123456789012345678');
+  });
+
+  it('sets key and mailbox subscription dates with quick day buttons', async () => {
+    const fetchMock = vi.mocked(fetch);
+    render(<App />);
+    await loginAdmin();
+
+    fireEvent.click(screen.getByText('测试邮箱 1'));
+    fireEvent.click(screen.getAllByText('7 天')[0]);
+    fireEvent.click(screen.getByRole('button', { name: '保存密钥时间' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/admin/mailboxes/profile-1/guest-key-expiration', expect.objectContaining({ method: 'PATCH' })));
+
+    fireEvent.click(screen.getAllByText('30 天')[1]);
+    fireEvent.click(screen.getByRole('button', { name: '保存订阅到期' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/admin/mailboxes/profile-1/expiration', expect.objectContaining({ method: 'PATCH' })));
+  });
+
+  it('shows the calendar page with key and subscription dates', async () => {
+    render(<App />);
+    await loginAdmin();
+
+    fireEvent.click(screen.getByRole('button', { name: /日历/ }));
+
+    await screen.findByRole('heading', { name: '日期日历' });
+    expect(screen.getByText('密钥有效期')).toBeInTheDocument();
+    expect(screen.getAllByText(/test-1@claw.email/).length).toBeGreaterThan(0);
   });
 });
