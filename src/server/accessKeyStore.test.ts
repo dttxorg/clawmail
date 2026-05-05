@@ -10,6 +10,7 @@ describe('SQLite guest access key store', () => {
     const key = 'key' in created ? created.key : '';
 
     expect(store.verifyAccessKey(key)).toBe('profile-1');
+    expect(store.getAccessKey('profile-1').key).toBe(key);
     expect(store.verifyAccessKey('ck_guest_wrong')).toBeNull();
     expect(store.listAccessKeys(['profile-1'])[0]).toMatchObject({ profileId: 'profile-1' });
 

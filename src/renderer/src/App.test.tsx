@@ -69,6 +69,9 @@ function mockFetch() {
     if (url === '/api/admin/mailboxes/profile-1/guest-key' && method === 'POST') {
       return jsonResponse({ profileId: 'profile-1', key: 'ck_guest_rotated_key_123456789012345678' }, true, 201);
     }
+    if (url === '/api/admin/mailboxes/profile-1/guest-key' && method === 'GET') {
+      return jsonResponse({ profileId: 'profile-1', key: 'ck_guest_visible_key_123456789012345678' });
+    }
     if (url === '/api/admin/mailboxes/profile-1' && method === 'DELETE') {
       return jsonResponse({ ok: true, profileId: 'profile-1', message: '已删除账号 test-1@claw.email。' });
     }
@@ -198,13 +201,17 @@ describe('App', () => {
     expect(document.querySelector('.mail-body strong')).toHaveTextContent('ClawMail');
   });
 
-  it('refreshes and resets guest keys from the admin mailbox row', async () => {
+  it('refreshes, views, and resets guest keys from the admin mailbox row', async () => {
     const fetchMock = vi.mocked(fetch);
     render(<App />);
     await loginAdmin();
 
     fireEvent.click(screen.getByRole('button', { name: '刷新邮箱' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/admin/mailboxes/profile-1/refresh', expect.objectContaining({ method: 'POST' })));
+
+    fireEvent.click(screen.getByRole('button', { name: '查看访客密钥' }));
+    await screen.findByText('ck_guest_visible_key_123456789012345678');
+    expect(fetchMock).toHaveBeenCalledWith('/api/admin/mailboxes/profile-1/guest-key', expect.objectContaining({ method: 'GET' }));
 
     fireEvent.click(screen.getByRole('button', { name: '重置访客密钥' }));
     await screen.findByText('ck_guest_rotated_key_123456789012345678');

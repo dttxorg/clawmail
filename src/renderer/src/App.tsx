@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Copy,
   KeyRound,
+  Eye,
   Lock,
   Mail,
   Plus,
@@ -278,6 +279,18 @@ export function App() {
     }
   }
 
+  async function viewGuestKey(profileId: string) {
+    try {
+      const result = await requestJson<GeneratedGuestKey>(`/api/admin/mailboxes/${encodeURIComponent(profileId)}/guest-key`, {
+        admin
+      });
+      setGeneratedKeys([result]);
+      setNotice('已显示完整访客密钥，可直接复制。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '查看密钥失败。');
+    }
+  }
+
   async function deleteProfile(profile: AdminProfile) {
     if (!window.confirm(`删除邮箱 ${profile.emailAddress}？本地缓存和加密凭据会一并删除。`)) return;
 
@@ -420,6 +433,9 @@ export function App() {
                     <div className="profile-actions">
                       <button className="icon-button" type="button" onClick={() => refreshProfile(profile.id)} aria-label="刷新邮箱">
                         <RefreshCw size={15} aria-hidden="true" />
+                      </button>
+                      <button className="icon-button" type="button" onClick={() => viewGuestKey(profile.id)} aria-label="查看访客密钥">
+                        <Eye size={15} aria-hidden="true" />
                       </button>
                       <button className="icon-button" type="button" onClick={() => rotateGuestKey(profile.id)} aria-label="重置访客密钥">
                         <KeyRound size={15} aria-hidden="true" />

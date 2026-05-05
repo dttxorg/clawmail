@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import Database from 'better-sqlite3';
@@ -16,19 +16,21 @@ export interface GuestAccessKeyResult extends GuestAccessKeyMetadata {
 
 interface GuestAccessKeyRow {
   profile_id: string;
+  encrypted_key: string | null;
   created_at: string;
   last_used_at: string | null;
 }
 
 export interface AccessKeyStore {
   ensureAccessKey(profileId: string): GuestAccessKeyResult | GuestAccessKeyMetadata;
+  getAccessKey(profileId: string): GuestAccessKeyResult;
   rotateAccessKey(profileId: string): GuestAccessKeyResult;
   verifyAccessKey(key: string): string | null;
   listAccessKeys(profileIds?: string[]): GuestAccessKeyMetadata[];
   close(): void;
 }
 
-export function createSqliteAccessKeyStore(databasePath: string): AccessKeyStore {
+export function createSqliteAccessKeyStore(databasePath: string, encryptionSecret = 'development-master-key'): AccessKeyStore {
   if (databasePath !== ':memory:') {
     mkdirSync(dirname(databasePath), { recursive: true });
   }
@@ -41,12 +43,25 @@ export function createSqliteAccessKeyStore(databasePath: string): AccessKeyStore
     ensureAccessKey(profileId) {
       const existing = activeKeyForProfile(db, profileId);
       if (existing) return mapRow(existing);
-      return insertAccessKey(db, profileId);
+      return insertAccessKey(db, profileId, encryptionSecret);
+    },
+    getAccessKey(profileId) {
+      const existing = activeKeyForProfile(db, profileId);
+      if (!existing) return insertAccessKey(db, profileId, encryptionSecret);
+
+      const key = decryptAccessKey(existing.encrypted_key, encryptionSecret);
+      if (key) return { ...mapRow(existing), key };
+
+      const transaction = db.transaction((id: string) => {
+        db.prepare('UPDATE guest_access_keys SET revoked_at = CURRENT_TIMESTAMP WHERE profile_id = ? AND revoked_at IS NULL').run(id);
+        return insertAccessKey(db, id, encryptionSecret);
+      });
+      return transaction(profileId);
     },
     rotateAccessKey(profileId) {
       const transaction = db.transaction((id: string) => {
         db.prepare('UPDATE guest_access_keys SET revoked_at = CURRENT_TIMESTAMP WHERE profile_id = ? AND revoked_at IS NULL').run(id);
-        return insertAccessKey(db, id);
+        return insertAccessKey(db, id, encryptionSecret);
       });
       return transaction(profileId);
     },
@@ -103,6 +118,7 @@ function migrate(db: DatabaseConnection): void {
       id TEXT PRIMARY KEY,
       profile_id TEXT NOT NULL,
       key_hash TEXT NOT NULL UNIQUE,
+      encrypted_key TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       last_used_at TEXT,
       revoked_at TEXT
@@ -111,13 +127,23 @@ function migrate(db: DatabaseConnection): void {
     CREATE INDEX IF NOT EXISTS idx_guest_access_keys_profile
       ON guest_access_keys(profile_id, revoked_at);
   `);
+
+  const columns = new Set(
+    db
+      .prepare('PRAGMA table_info(guest_access_keys)')
+      .all()
+      .map((row) => (row as { name: string }).name)
+  );
+  if (!columns.has('encrypted_key')) {
+    db.exec('ALTER TABLE guest_access_keys ADD COLUMN encrypted_key TEXT');
+  }
 }
 
 function activeKeyForProfile(db: DatabaseConnection, profileId: string): GuestAccessKeyRow | null {
   const row = db
     .prepare(
       `
-      SELECT profile_id, created_at, last_used_at
+      SELECT profile_id, encrypted_key, created_at, last_used_at
       FROM guest_access_keys
       WHERE profile_id = ? AND revoked_at IS NULL
       ORDER BY created_at DESC
@@ -128,15 +154,15 @@ function activeKeyForProfile(db: DatabaseConnection, profileId: string): GuestAc
   return row ?? null;
 }
 
-function insertAccessKey(db: DatabaseConnection, profileId: string): GuestAccessKeyResult {
+function insertAccessKey(db: DatabaseConnection, profileId: string, encryptionSecret: string): GuestAccessKeyResult {
   const key = createGuestAccessKey();
   const id = randomBytes(16).toString('hex');
   db.prepare(
     `
-    INSERT INTO guest_access_keys (id, profile_id, key_hash)
-    VALUES (?, ?, ?)
+    INSERT INTO guest_access_keys (id, profile_id, key_hash, encrypted_key)
+    VALUES (?, ?, ?, ?)
     `
-  ).run(id, profileId, hashAccessKey(key));
+  ).run(id, profileId, hashAccessKey(key), encryptAccessKey(key, encryptionSecret));
 
   const row = activeKeyForProfile(db, profileId);
   if (!row) throw new Error('访客密钥生成失败。');
@@ -161,4 +187,34 @@ function hashAccessKey(key: string): string {
 
 function isGuestAccessKey(key: string): boolean {
   return /^ck_guest_[A-Za-z0-9_-]{24,}$/.test(key);
+}
+
+function encryptAccessKey(value: string, encryptionSecret: string): string {
+  const iv = randomBytes(12);
+  const key = createHash('sha256').update(encryptionSecret).digest();
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const data = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  return [
+    iv.toString('base64url'),
+    cipher.getAuthTag().toString('base64url'),
+    data.toString('base64url')
+  ].join('.');
+}
+
+function decryptAccessKey(value: string | null, encryptionSecret: string): string | null {
+  if (!value) return null;
+  const [iv, tag, data] = value.split('.');
+  if (!iv || !tag || !data) return null;
+
+  try {
+    const key = createHash('sha256').update(encryptionSecret).digest();
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tag, 'base64url'));
+    return Buffer.concat([
+      decipher.update(Buffer.from(data, 'base64url')),
+      decipher.final()
+    ]).toString('utf8');
+  } catch {
+    return null;
+  }
 }

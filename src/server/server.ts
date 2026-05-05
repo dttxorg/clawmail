@@ -65,7 +65,7 @@ export async function createClawMailServer(config = loadServerConfig()) {
   await mkdir(config.dataDir, { recursive: true });
 
   const cacheStore = createSqliteCacheStore(config.databasePath);
-  const accessKeyStore = createSqliteAccessKeyStore(config.databasePath);
+  const accessKeyStore = createSqliteAccessKeyStore(config.databasePath, config.masterKey);
   const secretStore = createEncryptedFileSecretStore(config.secretFilePath, config.masterKey);
   const adapter = createRealClawCliAdapter({ cacheStore, secretStore });
   const refreshManager = new RefreshManager(adapter, config.refreshCooldownMs);
@@ -185,6 +185,13 @@ async function routeApi(
         const profile = (await adapter.listProfiles()).find((item) => item.id === profileId);
         if (!profile) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮箱。');
         writeJson(ctx.res, 201, accessKeyStore.rotateAccessKey(profile.id));
+        return;
+      }
+
+      if (ctx.method === 'GET' && action === 'guest-key') {
+        const profile = (await adapter.listProfiles()).find((item) => item.id === profileId);
+        if (!profile) throw new HttpError(404, 'NOT_FOUND', '未找到对应邮箱。');
+        writeJson(ctx.res, 200, accessKeyStore.getAccessKey(profile.id));
         return;
       }
 
