@@ -12,6 +12,8 @@
     "build": "tsc --noEmit && npm run build:web && npm run build:server",
     "build:web": "vite build --config vite.web.config.ts",
     "build:server": "vite build --config vite.server.config.ts",
+    "desktop:build": "electron-vite build",
+    "dist:win": "npm run desktop:build && electron-builder --win nsis --x64",
     "start": "node dist/server/index.js",
     "preview": "npm run build && npm run start",
     "pretest": "npm run rebuild:sqlite:node",
@@ -48,7 +50,7 @@
   },
   "build": {
     "appId": "com.clawinbox.app",
-    "productName": "ClawInbox",
+    "productName": "ClawMail",
     "directories": {
       "output": "release"
     },
@@ -65,6 +67,24 @@
         "dmg",
         "zip"
       ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ClawMail-${version}-Windows-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     }
   }
 }
